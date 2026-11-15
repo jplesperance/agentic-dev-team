@@ -1,8 +1,3 @@
-from cmd import PROMPT
-import code
-from email import message
-from inspect import cleandoc
-from nt import error
 import os
 import io
 import sys
