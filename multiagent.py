@@ -147,10 +147,12 @@ def build_project_graph(workspace_dir: str):
         sys_prompt = (
             "You are a Principal Product Manager. Inspect the starter template with `list_files`, then write:\n"
             "1. `docs/PRD.md`: Concise user stories, UI routes, SQLite schema, numbered acceptance criteria, "
-            "AND a **UI Test Selector Contract** table listing exact `data-testid` attributes for every page, "
-            "form input, `<select>` dropdown, submit button, filter control, and summary/list output.\n"
+            "and a **UI Test Selector Contract** table listing exact `data-testid` attributes for every page, "
+            "form input, `<select>` dropdown, submit button, and list/summary element.\n"
             "2. `docs/openapi.yaml`: Complete, compact OpenAPI 3.1 contract defining every FastAPI endpoint, "
-            "request body, query parameter, and JSON response schema."
+            "request body, query parameter, and JSON response schema.\n"
+            "SCOPE RULE: Build ONLY what the user asked for. Do NOT add user registration, login, or authentication "
+            "unless the user's prompt explicitly requests user accounts or authentication."
         )
         summary = run_tool_agent(
             tools, tools_by_name, sys_prompt, f"Build specifications for:\n{state['task']}", max_steps=20
@@ -180,16 +182,16 @@ def build_project_graph(workspace_dir: str):
     def frontend_node(state: TeamState) -> TeamState:
         print(f"[{state['project_name']} | Iter {state['iterations']}] Frontend Agent building Next.js...")
         sys_prompt = (
-            "You are a Senior Next.js (App Router + TypeScript + Tailwind) Engineer. Read `docs/PRD.md`, "
-            "`docs/openapi.yaml`, and `docs/bugs.json` (if present). Also inspect `backend/app/` schemas/routes "
-            "to confirm the exact JSON field names returned by FastAPI.\n"
-            "Build a complete, working UI in `frontend/src/app/` and a typed fetch client in `frontend/src/lib/api.ts` "
+            "You are a Senior Next.js (App Router + TypeScript + Tailwind) Engineer.\n"
+            "1. If `docs/bugs.json` has bugs, your VERY FIRST tool call MUST be `read_file('docs/bugs.json')`, "
+            "followed by `read_file('frontend/tests/e2e.spec.ts')`. Never assume existing code works if QA failed it.\n"
+            "2. Read `docs/PRD.md`, `docs/openapi.yaml`, and inspect `backend/app/` to confirm exact JSON field names.\n"
+            "3. Build a complete, working UI in `frontend/src/app/` and a typed fetch client in `frontend/src/lib/api.ts` "
             "targeting `http://127.0.0.1:8000`.\n"
             "CRITICAL RULES:\n"
-            "- Apply every `data-testid` attribute defined in `docs/PRD.md` to the corresponding HTML elements.\n"
-            "- NEVER let a page hang on a loading spinner: wrap every `fetch` in `try { ... } catch (err) { setError(...) } "
-            "finally { setLoading(false) }`, and render any error message visibly on the page.\n"
-            "- NEVER write placeholder text, mock data, or non-functional buttons.\n"
+            "- Apply every `data-testid` attribute defined in `docs/PRD.md`.\n"
+            "- Wrap every `fetch` in `try { ... } catch (err) { setError(...) } finally { setLoading(false) }` "
+            "and render any API error message visibly on the page so forms never fail silently.\n"
             "- Run `npm run build` in `frontend` via `run_command` and fix all build errors before finishing."
         )
         bug_msg = f"\nFix these reported bugs:\n{json.dumps(state['bugs'], indent=2)}" if state["bugs"] else ""
@@ -204,6 +206,10 @@ def build_project_graph(workspace_dir: str):
         current_iter = state["iterations"] + 1
         print(f"[{state['project_name']} | Iter {current_iter}] QA Agent testing live full-stack app...")
         ws = Path(workspace_dir)
+
+        # Reset SQLite databases so each QA iteration starts with clean state
+        for db_file in (ws / "backend").glob("*.db"):
+            db_file.unlink()
 
         backend_proc = subprocess.Popen(
             [".venv/bin/uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"],
@@ -228,22 +234,21 @@ def build_project_graph(workspace_dir: str):
                 "You are a QA Automation Engineer. FastAPI is live on http://127.0.0.1:8000 and Next.js is live on "
                 "http://127.0.0.1:3000. Read `docs/PRD.md` and `docs/openapi.yaml`.\n"
                 "Write `frontend/tests/e2e.spec.ts` with TWO test groups:\n"
-                "1. API Smoke Tests using Playwright's `request` fixture against `http://127.0.0.1:8000` to verify "
-                "every endpoint in `openapi.yaml` returns valid status codes and schemas.\n"
-                "2. Browser E2E Tests against `http://127.0.0.1:3000` using the `data-testid` attributes defined in "
-                "`docs/PRD.md` (`page.getByTestId(...)`).\n"
+                "1. API Smoke Tests using Playwright's `request` fixture against `http://127.0.0.1:8000` verifying "
+                "every endpoint in `openapi.yaml`.\n"
+                "2. Browser E2E Tests against `http://127.0.0.1:3000` using `page.getByTestId(...)` from `docs/PRD.md`.\n"
                 "PLAYWRIGHT RULES:\n"
-                "- Attach `page.on('pageerror', ...)` and `page.on('response', ...)` listeners in `test.beforeEach` "
-                "to capture runtime JS exceptions and HTTP >= 400 responses, and log `await page.locator('body').innerText()` "
-                "on failure so bugs are immediately diagnosable.\n"
-                "- For `<select>` dropdowns, use `await select.selectOption('Paid')` and assert "
-                "`await expect(select).toHaveValue('Paid')`—NEVER call `.toBeVisible()` on an `<option>` element.\n"
+                "- Remember each Playwright `test()` block starts with empty `localStorage` and cookies. Either seed "
+                "required prerequisites per test or use `test.describe.serial` with a shared flow.\n"
+                "- Attach `page.on('pageerror', ...)` and `page.on('response', async res => { if (res.status() >= 400) ... })` "
+                "to capture HTTP status codes, response bodies, and runtime JS errors.\n"
+                "- For `<select>` dropdowns, use `await select.selectOption(...)` and assert `toHaveValue(...)`—NEVER "
+                "call `.toBeVisible()` on an `<option>` element.\n"
                 "- Run `npx playwright test --reporter=list` in `frontend` via `run_command`.\n"
-                "Write `docs/bugs.json` as a JSON array of objects:\n"
+                "Write `docs/bugs.json` as a JSON array:\n"
                 '[{"layer": "backend" | "frontend", "route": "...", "description": "...", "trace": "..."}]\n'
-                "Include any browser console/page errors, HTTP status codes, and visible page text inside `trace`. "
-                "Tag any 404/422/500 API error or missing database persistence as `\"layer\": \"backend\"`. "
-                "If all tests pass, write `[]` to `docs/bugs.json`."
+                "Include failed HTTP response bodies and page text inside `trace`. Tag 404/422/500 API errors as "
+                "`\"layer\": \"backend\"`. If all tests pass, write `[]` to `docs/bugs.json`."
             )
             prompt = f"Servers ready (backend={be_up}, frontend={fe_up}). Run E2E tests and file bugs in docs/bugs.json."
             summary = run_tool_agent(tools, tools_by_name, sys_prompt, prompt, max_steps=25)
