@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+starter-template/frontend/.next/
+starter-template/frontend/next-env.d.ts
+starter-template/frontend/node_modules/
+starter-template/frontend/package-lock.json
