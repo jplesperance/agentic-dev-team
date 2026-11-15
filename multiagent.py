@@ -37,7 +37,7 @@ def planner_node(state: TeamState) -> TeamState:
     else:
         user_content = state["task"]
 
-    prompt = ChatPromptTemplate.from_message([
+    prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         ("human", "{user_content}")
     ])
