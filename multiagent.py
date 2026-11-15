@@ -20,7 +20,7 @@ class TeamState(TypedDict):
     route_back_to: str
     execution_log: List[str]
 
-llm = ChatGroq(model_name="llama-3-3-70b-versatile")
+llm = ChatGroq(model_name="llama-3.3-70b-versatile")
 
 def planner_node(state: TeamState) -> TeamState:
     print(f"\n[Iteration {state['iterations'] + 1}] Planner is structuring pseudocode....")
