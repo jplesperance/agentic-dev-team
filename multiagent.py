@@ -9,7 +9,7 @@ import sys
 from typing import TypedDict, Literal, List
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
-from langchain.graph import StatsGraph, END
+from langchain.graph import StateGraph, END
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -203,7 +203,7 @@ workflow.set_entry_point("planner")
 workflow.add_edge("planner", "coder")
 workflow.add_edge("coder", "tester")
 
-workflow.add_conditional_edges("tester", evaluate_test_results, {}"write_file": "write_file", "triage": "verifier"})
+workflow.add_conditional_edges("tester", evaluate_test_results, {"write_file": "write_file", "triage": "verifier"})
 workflow.add_conditional_edges("verifier", route_triage, {"planner": "planner", "coder": "coder", "end": END})
 workflow.add_edge("write_file", END)
 
