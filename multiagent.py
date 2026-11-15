@@ -141,7 +141,7 @@ def build_project_graph(workspace_dir: str):
 
     # --- AGENT 1: PRODUCT AGENT (Replaces planner_node) ---
     def product_node(state: TeamState) -> TeamState:
-        current_iter = state["iterations"] + 1
+        current_iter = state["iterations"]
         print(f"\n[{state['project_name']} | Iter {current_iter}] Product Agent writing specs...")
 
         sys_prompt = (
