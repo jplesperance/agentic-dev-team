@@ -160,10 +160,11 @@ def build_project_graph(workspace_dir: str):
 
         sys_prompt = (
             "You are a Senior FastAPI Engineer. Read `docs/PRD.md`, `docs/openapi.yaml`, and `docs/bugs.json` "
-            "(if present). Implement the backend inside `backend/app/` using FastAPI, Pydantic v2, and SQLite "
-            "(SQLAlchemy), with CORSMiddleware allowing `http://localhost:3000`. "
-            "Write unit/API tests in `backend/tests/test_api.py` and run `.venv/bin/pytest` in `backend` "
-            "via `run_command` until all tests pass."
+            "(if present). Implement the complete backend inside `backend/app/` using FastAPI, Pydantic v2, "
+            "and SQLite (SQLAlchemy) with automatic table creation on startup (`Base.metadata.create_all`), "
+            "and CORSMiddleware allowing `http://localhost:3000` and `http://127.0.0.1:3000`. "
+            "Do NOT leave stub or TODO endpoints. Write thorough tests in `backend/tests/test_api.py` covering "
+            "every endpoint in `openapi.yaml`, then run `.venv/bin/pytest` in `backend` via `run_command` until it passes."
         )
         bug_msg = f"\nFix these reported bugs:\n{json.dumps(state['bugs'], indent=2)}" if state["bugs"] else ""
         summary = run_tool_agent(tools, tools_by_name, sys_prompt, f"Implement or fix the FastAPI backend.{bug_msg}")
@@ -175,12 +176,16 @@ def build_project_graph(workspace_dir: str):
     def frontend_node(state: TeamState) -> TeamState:
         print(f"[{state['project_name']} | Iter {state['iterations']}] Frontend Agent building Next.js...")
 
-        sys_prompt = (
+       sys_prompt = (
             "You are a Senior Next.js (App Router + TypeScript + Tailwind) Engineer. Read `docs/PRD.md`, "
-            "`docs/openapi.yaml`, and `docs/bugs.json` (if present). Build the UI in `frontend/src/app/` and "
-            "a typed fetch client in `frontend/src/lib/api.ts` targeting `http://127.0.0.1:8000` that matches "
-            "`docs/openapi.yaml`. Run `npm run build` in `frontend` via `run_command` and resolve any TypeScript "
-            "or build errors before finishing."
+            "`docs/openapi.yaml`, and `docs/bugs.json` (if present). Build a complete, working UI in "
+            "`frontend/src/app/` and a typed fetch client in `frontend/src/lib/api.ts` targeting "
+            "`http://127.0.0.1:8000` that matches `docs/openapi.yaml`. "
+            "CRITICAL RULES:\n"
+            "- NEVER write placeholder text, mock data, or non-functional buttons. Every form, file upload, "
+            "filter, and chart/summary must perform real API calls to `http://127.0.0.1:8000` and render live backend data.\n"
+            "- Ensure the root `/` page either renders the main dashboard or links clearly to all routes.\n"
+            "- Run `npm run build` in `frontend` via `run_command` and fix all TypeScript/build errors before finishing."
         )
         bug_msg = f"\nFix these reported bugs:\n{json.dumps(state['bugs'], indent=2)}" if state["bugs"] else ""
         summary = run_tool_agent(tools, tools_by_name, sys_prompt, f"Implement or fix the Next.js frontend.{bug_msg}")
