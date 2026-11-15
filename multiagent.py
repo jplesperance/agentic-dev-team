@@ -96,7 +96,7 @@ def run_tool_agent(tools: list, tools_by_name: dict, system_prompt: str, user_pr
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_prompt),
     ]
-    for _ in range(max_steps):
+    for step in range(max_steps):
         response = llm_with_tools.invoke(messages)
         messages.append(response)
         if not response.tool_calls:
