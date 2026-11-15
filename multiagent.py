@@ -1,227 +1,331 @@
 import os
-import io
-import sys
+import json
+import shutil
+import socket
+import subprocess
+import time
+from pathlib import Path
 from typing import TypedDict, Literal, List
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_groq import ChatGroq
-from langgraph.graph import StateGraph, END
+
 from dotenv import load_dotenv
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langchain_core.tools import tool
+from langchain_openai import ChatOpen
+from langgraph.graph import StateGraph, END
 
 load_dotenv()
 
+# Use temperature=0 for reliable tool calling and JSON/YAML generation
+llm = ChatOpenAI(model_name="gpt-4o", temperature=0, max_retries=2)
+
+
+# =====================================================================
+# 1. WORKSPACE-JAILED TOOLS (Replaces single-string code & exec())
+# =====================================================================
+def create_workspace_tools(workspace_dir: str):
+    root = Path(workspace_dir).resolve()
+
+    def _safe_path(rel_path: str) -> Path:
+        target = (root / rel_path).resolve()
+        if not str(target).startswith(str(root)):
+            raise ValueError(f"Blocked path outside workspace: {rel_path}")
+        return target
+
+    @tool
+    def list_files(subdir: str = ".") -> str:
+        """List all project files relative to the workspace root."""
+        base = _safe_path(subdir)
+        ignored = {"node_modules", ".next", ".git", "__pycache__", ".venv"}
+        files = [
+            str(p.relative_to(root))
+            for p in base.rglob("*")
+            if p.is_file() and not any(part in ignored for part in p.parts)
+        ]
+        return "\n".join(sorted(files)) or "(empty)"
+
+    @tool
+    def read_file(rel_path: str) -> str:
+        """Read a file inside the project workspace."""
+        target = _safe_path(rel_path)
+        return target.read_text(encoding="utf-8") if target.exists() else f"Not found: {rel_path}"
+
+    @tool
+    def write_file(rel_path: str, content: str) -> str:
+        """Create or overwrite a file inside the project workspace."""
+        target = _safe_path(rel_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return f"Saved {rel_path} ({len(content)} chars)"
+
+    @tool
+    def run_command(command: str, cwd_subdir: str = ".") -> str:
+        """Run a shell command (pytest, npm run build, npx playwright test) inside the workspace."""
+        work_dir = _safe_path(cwd_subdir)
+        try:
+            res = subprocess.run(
+                command,
+                shell=True,
+                cwd=work_dir,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            output = f"EXIT_CODE: {res.returncode}\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+            return output[-5000:]  # Truncate massive build logs to protect context window
+        except subprocess.TimeoutExpired:
+            return "ERROR: Command timed out after 120s."
+
+    tools = [list_files, read_file, write_file, run_command]
+    return tools, {t.name: t for t in tools}
+
+
+def run_tool_agent(tools: list, tools_by_name: dict, system_prompt: str, user_prompt: str, max_steps: int = 15) -> str:
+    """Executes an agentic tool-calling loop until the agent finishes its files and checks."""
+    llm_with_tools = llm.bind_tools(tools)
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt),
+    ]
+    for _ in range(max_steps):
+        response = llm_with_tools.invoke(messages)
+        messages.append(response)
+        if not response.tool_calls:
+            return response.content or "Completed."
+        for tc in response.tool_calls:
+            fn = tools_by_name.get(tc["name"])
+            result = fn.invoke(tc["args"]) if fn else f"Unknown tool: {tc['name']}"
+            messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
+    return "Stopped after reaching max tool steps."
+
+
+def wait_for_port(port: int, timeout: float = 15.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            if sock.connect_ex(("127.0.0.1", port)) == 0:
+                return True
+        time.sleep(0.5)
+    return False
+
+
+# =====================================================================
+# 2. GRAPH STATE (Adapted from your TeamState)
+# =====================================================================
 class TeamState(TypedDict):
+    project_name: str
+    workspace_dir: str
     task: str
-    pseudocode: str
-    code: str
-    test_cases: str
-    errors: str
+    bugs: List[dict]
     iterations: int
     success: bool
     route_back_to: str
     execution_log: List[str]
 
-llm = ChatGroq(model_name="llama-3.3-70b-versatile")
 
-def planner_node(state: TeamState) -> TeamState:
-    print(f"\n[Iteration {state['iterations'] + 1}] Planner is structuring pseudocode....")
-    current_iter = state['iterations'] + 1
+# =====================================================================
+# 3. GRAPH FACTORY (Builds a workspace-bound 4-agent team per project)
+# =====================================================================
+def build_project_graph(workspace_dir: str):
+    tools, tools_by_name = create_workspace_tools(workspace_dir)
 
-    system_prompt = (
-        "You are an expert software architect.  Create a detailed, robust pseudocode layour "
-        "to solve the user's problem.  Do not write actual python code.  Focus on logic boundaries, edges cases, and step-by-step algorithms"
+    # --- AGENT 1: PRODUCT AGENT (Replaces planner_node) ---
+    def product_node(state: TeamState) -> TeamState:
+        current_iter = state["iterations"] + 1
+        print(f"\n[{state['project_name']} | Iter {current_iter}] Product Agent writing specs...")
+
+        sys_prompt = (
+            "You are a Principal Product Manager. Inspect the starter template with `list_files`, then write:\n"
+            "1. `docs/PRD.md`: User stories, UI pages, SQLite data models, and numbered acceptance criteria.\n"
+            "2. `docs/openapi.yaml`: Strict OpenAPI 3.1 contract defining all FastAPI endpoints, request payloads, "
+            "and JSON responses so backend and frontend agents can build against the exact same schema."
+        )
+        summary = run_tool_agent(tools, tools_by_name, sys_prompt, f"Build specifications for:\n{state['task']}")
+
+        log_entry = f"### Iteration {current_iter}: Product Agent\n**Summary:** {summary}\n\n"
+        return {
+            **state,
+            "iterations": current_iter,
+            "execution_log": state["execution_log"] + [log_entry],
+        }
+
+    # --- AGENT 2: BACKEND AGENT (FastAPI + Pytest) ---
+    def backend_node(state: TeamState) -> TeamState:
+        print(f"[{state['project_name']} | Iter {state['iterations']}] Backend Agent building FastAPI...")
+
+        sys_prompt = (
+            "You are a Senior FastAPI Engineer. Read `docs/PRD.md`, `docs/openapi.yaml`, and `docs/bugs.json` "
+            "(if present). Implement the backend inside `backend/app/` using FastAPI, Pydantic v2, and SQLite "
+            "(SQLAlchemy), with CORSMiddleware allowing `http://localhost:3000`. "
+            "Write unit/API tests in `backend/tests/test_api.py` and run `.venv/bin/pytest` in `backend` "
+            "via `run_command` until all tests pass."
+        )
+        bug_msg = f"\nFix these reported bugs:\n{json.dumps(state['bugs'], indent=2)}" if state["bugs"] else ""
+        summary = run_tool_agent(tools, tools_by_name, sys_prompt, f"Implement or fix the FastAPI backend.{bug_msg}")
+
+        log_entry = f"### Iteration {state['iterations']}: Backend Agent\n**Summary:** {summary}\n\n"
+        return {**state, "execution_log": state["execution_log"] + [log_entry]}
+
+    # --- AGENT 3: FRONTEND AGENT (Next.js App Router + TypeScript) ---
+    def frontend_node(state: TeamState) -> TeamState:
+        print(f"[{state['project_name']} | Iter {state['iterations']}] Frontend Agent building Next.js...")
+
+        sys_prompt = (
+            "You are a Senior Next.js (App Router + TypeScript + Tailwind) Engineer. Read `docs/PRD.md`, "
+            "`docs/openapi.yaml`, and `docs/bugs.json` (if present). Build the UI in `frontend/src/app/` and "
+            "a typed fetch client in `frontend/src/lib/api.ts` targeting `http://127.0.0.1:8000` that matches "
+            "`docs/openapi.yaml`. Run `npm run build` in `frontend` via `run_command` and resolve any TypeScript "
+            "or build errors before finishing."
+        )
+        bug_msg = f"\nFix these reported bugs:\n{json.dumps(state['bugs'], indent=2)}" if state["bugs"] else ""
+        summary = run_tool_agent(tools, tools_by_name, sys_prompt, f"Implement or fix the Next.js frontend.{bug_msg}")
+
+        log_entry = f"### Iteration {state['iterations']}: Frontend Agent\n**Summary:** {summary}\n\n"
+        return {**state, "execution_log": state["execution_log"] + [log_entry]}
+
+    # --- AGENT 4: QA AGENT (Replaces tester_node + verifier_node) ---
+    def qa_node(state: TeamState) -> TeamState:
+        print(f"[{state['project_name']} | Iter {state['iterations']}] QA Agent testing live full-stack app...")
+        ws = Path(workspace_dir)
+
+        backend_proc = subprocess.Popen(
+            [".venv/bin/uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"],
+            cwd=ws / "backend",
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        frontend_proc = subprocess.Popen(
+            ["npm", "run", "dev", "--", "-p", "3000"],
+            cwd=ws / "frontend",
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        try:
+            be_up = wait_for_port(8000, timeout=15)
+            fe_up = wait_for_port(3000, timeout=20)
+
+            sys_prompt = (
+                "You are a QA Automation Engineer. FastAPI is running on http://127.0.0.1:8000 and Next.js is "
+                "running on http://127.0.0.1:3000. Read `docs/PRD.md` and `docs/openapi.yaml`. "
+                "Write end-to-end tests in `frontend/tests/e2e.spec.ts` covering every acceptance criterion, "
+                "then run `npx playwright test` in `frontend` via `run_command`. "
+                "Finally, write `docs/bugs.json` containing a JSON array of objects:\n"
+                '[{"layer": "backend" | "frontend", "route": "...", "description": "...", "trace": "..."}]\n'
+                "If all tests pass, write `[]` to `docs/bugs.json`."
+            )
+            prompt = f"Servers ready (backend={be_up}, frontend={fe_up}). Run E2E tests and file bugs in docs/bugs.json."
+            summary = run_tool_agent(tools, tools_by_name, sys_prompt, prompt)
+        finally:
+            frontend_proc.terminate()
+            backend_proc.terminate()
+            frontend_proc.wait(timeout=10)
+            backend_proc.wait(timeout=10)
+
+        bugs_file = ws / "docs" / "bugs.json"
+        bugs = json.loads(bugs_file.read_text(encoding="utf-8")) if bugs_file.exists() else []
+        success = len(bugs) == 0
+
+        # Triage routing (replaces verifier_node)
+        if any(b.get("layer") == "backend" for b in bugs):
+            route_back = "backend"
+        elif bugs:
+            route_back = "frontend"
+        else:
+            route_back = "finalize"
+
+        status_msg = "All E2E tests passed!" if success else f"{len(bugs)} bug(s) filed -> routing to {route_back}"
+        log_entry = f"### Iteration {state['iterations']}: QA Agent\n**Status:** {status_msg}\n**Notes:** {summary}\n\n"
+
+        return {
+            **state,
+            "bugs": bugs,
+            "success": success,
+            "route_back_to": route_back,
+            "iterations": state["iterations"] + 1,
+            "execution_log": state["execution_log"] + [log_entry],
+        }
+
+    # --- FINALIZE NODE (Replaces write_file_node) ---
+    def finalize_node(state: TeamState) -> TeamState:
+        ws = Path(workspace_dir)
+        status = "Successfully Verified" if state["success"] else f"Stopped at Max Iterations ({len(state['bugs'])} bugs remaining)"
+        log_header = (
+            f"# DevTeam Pipeline Log: {state['project_name']}\n"
+            f"**Task:** {state['task']}\n"
+            f"**Status:** {status}\n---\n\n"
+        )
+        (ws / "docs" / "workflow_log.md").write_text(
+            log_header + "".join(state["execution_log"]),
+            encoding="utf-8",
+        )
+        print(f"[{state['project_name']}] Finished -> {status}")
+        return state
+
+    def route_after_qa(state: TeamState) -> Literal["backend", "frontend", "finalize"]:
+        if state["success"] or state["iterations"] >= 4:
+            return "finalize"
+        return state["route_back_to"]  # type: ignore
+
+    workflow = StateGraph(TeamState)
+    workflow.add_node("product", product_node)
+    workflow.add_node("backend", backend_node)
+    workflow.add_node("frontend", frontend_node)
+    workflow.add_node("qa", qa_node)
+    workflow.add_node("finalize", finalize_node)
+
+    workflow.set_entry_point("product")
+    workflow.add_edge("product", "backend")
+    workflow.add_edge("backend", "frontend")
+    workflow.add_edge("frontend", "qa")
+    workflow.add_conditional_edges(
+        "qa",
+        route_after_qa,
+        {"backend": "backend", "frontend": "frontend", "finalize": "finalize"},
     )
+    workflow.add_edge("finalize", END)
 
-    if state["errors"] and state["route_back_to"] == "planner":
-        user_prompt_template = f"Your previous pseudocode led to a bug.  Fix the logic\nTask: {task}\nError Context: {error}"
-        user_content = user_prompt_template.format(task=state["task"], errors=state["errors"])
-    else:
-        user_content = state["task"]
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "{user_content}")
-    ])
-
-    response = (prompt | llm).invoke({"user_content": user_content})
-    pseudocode_out = response.content
-
-    log_entry = (
-        f"### Iteration {current_iter}: Planner Agent\n"
-        f"**Action:** Generated/Revised Blueprint Architecture\n"
-        f"**Output:**\n\n{pseudocode_out}\n\n"
-    )
-
-    updated_log = state.get("execution_log", []) + [log_entry]
-    return {**state, "pseudocode": pseudocode_out, "iterations": current_iter, "execution_log": updated_log}
-
-def coder_node(state: TeamState) -> TeamState:
-    print("Coder is implementing Python code...")
-
-    system_prompt = (
-        "You are an expert python developer.  Convert the provided pseudocode into a clean, "
-        "executable python function named `solution`.  Return only raw python code inside a "
-        "markdown code block.  no explanations."
-    )
-
-    user_content = f"Pseudocode Blueprint:\n\n{state['pseudocode']}"
-    if state["errors"] and state["route_back_to"] == "coder":
-        user_content += f"\n\nYour previous code failed with this error, fix it: \n{state['errors']}"
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "{user_content}")
-    ])
-
-    response = (prompt | llm).invoke({"user_content": user_content})
-    cleaned_code = response.content.split("```python")[-1].split("```")[0].strip()
-
-    log_entry = (
-        f"### Iternation {state['iterations']}: Coder Agent\n"
-        f"**Ation:** Compiled Ptyon Source Implementation.\n"
-        f"**Output?**\n```python\n{cleaned_code}\n```\n\n"
-    )
-    updated_log = state["execution_log"] + [log_entry]
-    return {**state, "code": cleaned_code, "execution_log": updated_log}
+    return workflow.compile()
 
 
-def tester_node(state: TeamState) -> TeamState:
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a QA engineer.  Write 3 destinct assert statements testing a function named `solution`. "
-                   "Return only the python code containing the assertions.  do not include the function defition itself."),
-        ("human", "{task}")
-    ])
-    response = (prompt | llm).invoke({"task": state["task"]})
-    test_cases = response.content.split("```python")[-1].split("```")[0].strip()
+# =====================================================================
+# 4. CONSECUTIVE PROJECT RUNNER
+# =====================================================================
+def run_project_queue(projects: List[dict], template_dir: str = "./starter-template"):
+    for project in projects:
+        slug = project["slug"]
+        ws_path = Path(f"./workspaces/{slug}").resolve()
 
-    execution_payload = f"{state['code']}\n\n{test_cases}"
+        # Clean slate for each consecutive project
+        if ws_path.exists():
+            shutil.rmtree(ws_path)
+        shutil.copytree(template_dir, ws_path, symlinks=True)
 
-    old_stdout, old_stderr = sys.stdout, sys.stderr
-    redirected_error = io.StringIO()
-    sys.stderr = redirected_error
+        app = build_project_graph(str(ws_path))
 
-    success = False
-    error_msg = ""
+        initial_state: TeamState = {
+            "project_name": slug,
+            "workspace_dir": str(ws_path),
+            "task": project["task"],
+            "bugs": [],
+            "iterations": 0,
+            "success": False,
+            "route_back_to": "",
+            "execution_log": [],
+        }
 
-    try:
-        exec_globals = {}
-        exec(execution_payload, exec_globals)
-        success = True
-    except:
-        import traceback
-        success = False
-        error_msg = traceback.format_exc()
-    finally:
-        sys.stdout, sys.stderr = old_stdout, old_stderr
-            
-    status_msg = " All Test Passed!" if success else f" Test suite failed\n\n```text\n{error_msg}\n```"
-    log_entry = (
-        f"### Iteration {state['iterations']}: Tester Agent\n"
-        f"***Generated Assertion Test Suite:**\n```python\n{test_cases}\n```\n"
-        f"**Execution Status:** {status_msg}\n\n"
-    )
-    updated_log = state["execution_log"] + [log_entry]
-
-    return {**state, "test_cases": test_cases, "errors": error_msg, "success": success, "execution_log": updated_log}
-
-def verifier_node(state: TeamState) -> TeamState:
-    print(" Verifier is analyzing the failure log...")
-
-    system_prompt = (
-        "You are a Senior Project Manager.  Analyze the failed code, the original pseudocode blueprint, "
-        "and the execution error.  Determine if the error is due to bad algorithmic logic (PLANNER) "
-        "or an implementaion/syntax bug (CODER). Respond with exactly one word: 'PLANNER', or 'CODER'."
-    )
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", f"Pseudocode:\n{pseudocode}\n\nCode:\n{code}\n\nError Log:\n{errors}")
-    ])
-
-    response = (prompt | llm).invoke({
-        "pseudocode": state["pseudocode"],
-        "code": state["code"],
-        "errors": state["errors"]
-    })
-
-    decision = response.content.strip().upper()
-
-    route = "planner" if "PLANNER" in decision else "coder"
-    print(f"Verifier found the culprit: Routing fix back to the [{route.upper()}] agent")
-
-    log_entry = (
-        f"### Iteration {state['iterations']}: Verifier Triage\n"
-        f"**Analysis:** Evaluated broken runtime cycle.\n"
-        f"**Verdict:** Fault attributed to **[{route.upper()}]**.  Routing system correction back to the source node.\n\n"
-    )
-    updated_log = state["execution_log"] + [log_entry]
-
-    return {**state, "route_back_to": route, "execution_log": updated_log}
-
-def evaluate_test_results(state: TeamState) -> TeamState:
-    if state["success"]:
-        return "write_file"
-    return "triage"
-
-def route_triage(state: TeamState) -> TeamState:
-    if state["iterations"] >= 4:
-        print("Loop threshold breached. Safe Exiting.....")
-        return "end"
-    return state["route_back_to"]
-
-def write_file_node(state: TeamState) -> TeamState:
-    print("")
-    with open("verified_solution.py", "w", encoding="utf-5") as f:
-        f.write(state["code"]) 
-
-    log_header = (
-        f"# DevTeam Pipeline Execution Log\n"
-        f"**Core Task:** {state['task']}\n"
-        f"**Total Workflow Runtime Cycles:** {state['iterations']}\n"
-        f"**Final Status:** Successfully Compiled and Verified\n"
-        f"---\n\n"
-    )
-
-    full_log_content = log_header + "".join(state["execution_log"])
-    with open("workflow_log.md", "w", encoding="utf-8") as f:
-        f.write(full_log_content)
-    return state
-
-workflow = StateGraph(TeamState)
-
-workflow.add_node("planner", planner_node)
-workflow.add_node("coder", coder_node)
-workflow.add_node("tester", tester_node)
-workflow.add_node("verifier", verifier_node)
-workflow.add_node("write_file", write_file_node)
-
-workflow.set_entry_point("planner")
-workflow.add_edge("planner", "coder")
-workflow.add_edge("coder", "tester")
-
-workflow.add_conditional_edges("tester", evaluate_test_results, {"write_file": "write_file", "triage": "verifier"})
-workflow.add_conditional_edges("verifier", route_triage, {"planner": "planner", "coder": "coder", "end": END})
-workflow.add_edge("write_file", END)
-
-app = workflow.compile()
+        app.invoke(initial_state)
 
 
 if __name__ == "__main__":
-    task = (
-        "create a function the accepts an integer as an input named `solution(num)` and calculate the highest prime number between 1 and the inputted integer. "
-        "Additonally, the function should output the total number of prime numbers based on the supplied integer.  output shoudl be (highest_prime, total_primes "
-        "Crucial: Your solution must run in O(n) time complexity and use O(1) extra space complexity"
-    )
+    project_queue = [
+        {
+            "slug": "invoice-tracker",
+            "task": "Build an invoice manager where users can create invoices, filter by Paid/Pending status, and view total revenue.",
+        },
+        {
+            "slug": "habit-streaks",
+            "task": "Build a daily habit tracker where users can add habits, toggle daily completions, and see active streak counts.",
+        },
+    ]
 
-    initial_state: TeamState = {
-        "task": task,
-        "pseudocode": "",
-        "code": "",
-        "test_cases": "",
-        "errors": "",
-        "iterations": 0,
-        "success": False,
-        "route_back_to": "",
-        "execution_log": []
-    }
-
-    app.invoke(initial_state)
+    run_project_queue(project_queue)
