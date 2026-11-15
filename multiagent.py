@@ -134,10 +134,10 @@ def verifier_node(state: TeamState) -> TeamState:
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
-        ("human", f"Pseudocode:\n{pseudocode}\m\mCode:\n{code}\n\nError Log:\n{errors}")
+        ("human", f"Pseudocode:\n{pseudocode}\n\nCode:\n{code}\n\nError Log:\n{errors}")
     ])
 
-    response = (prompt | llm).invode({
+    response = (prompt | llm).invoke({
         "pseudocode": state["pseudocode"],
         "code": state["code"],
         "errors": state["errors"]
