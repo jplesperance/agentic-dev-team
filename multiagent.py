@@ -44,7 +44,14 @@ def create_workspace_tools(workspace_dir: str):
     @tool
     def list_files(subdir: str = ".") -> str:
         """List all project files relative to the workspace root."""
-        base = _safe_path(subdir)
+        try:
+            base = _safe_path(subdir)
+        except ValueError as e:
+            return str(e)
+        if not base.exists():
+            return f"Directory not found: {subdir}"
+        if not base.is_dir():
+            return f"'{subdir}' is a file, not a directory. Use read_file('{subdir}')."
         ignored = {"node_modules", ".next", ".git", "__pycache__", ".venv"}
         files = [
             str(p.relative_to(root))
@@ -55,9 +62,19 @@ def create_workspace_tools(workspace_dir: str):
 
     @tool
     def read_file(rel_path: str) -> str:
-        """Read a file inside the project workspace."""
-        target = _safe_path(rel_path)
-        return target.read_text(encoding="utf-8") if target.exists() else f"Not found: {rel_path}"
+        """Read a text file inside the project workspace."""
+        try:
+            target = _safe_path(rel_path)
+        except ValueError as e:
+            return str(e)
+        if not target.exists():
+            return f"Not found: {rel_path}"
+        if target.is_dir():
+            return f"'{rel_path}' is a directory, not a file. Use list_files('{rel_path}') first."
+        try:
+            return target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return f"Cannot read binary file: {rel_path}"
 
     @tool
     def write_file(rel_path: str, content: str) -> str:
@@ -211,7 +228,8 @@ def build_project_graph(workspace_dir: str):
             "`run_command`—never output code only in chat.\n"
             "1. If `docs/bugs.json` has bugs, your VERY FIRST tool call MUST be `read_file('docs/bugs.json')`, "
             "followed by `read_file('frontend/tests/e2e.spec.ts')`.\n"
-            "2. Read `docs/PRD.md`, `docs/openapi.yaml`, and inspect `backend/app/` to confirm exact JSON field names.\n"
+            "2. Read `docs/PRD.md`, `docs/openapi.yaml`, and call `list_files('backend/app')` + `read_file` on "
+            "the backend route/schema files to confirm exact JSON field names.\n"
             "3. Build the UI in `frontend/src/app/` and a typed fetch client in `frontend/src/lib/api.ts` targeting "
             "`http://127.0.0.1:8000`.\n"
             "CRITICAL RULES:\n"
