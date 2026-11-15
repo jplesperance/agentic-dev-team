@@ -89,14 +89,16 @@ def create_workspace_tools(workspace_dir: str):
     return tools, {t.name: t for t in tools}
 
 
-def run_tool_agent(tools: list, tools_by_name: dict, system_prompt: str, user_prompt: str, max_steps: int = 35) -> str:
+def run_tool_agent(tools: list, tools_by_name: dict, system_prompt: str, user_prompt: str, max_steps: int = 40) -> str:
     """Executes an agentic tool-calling loop until the agent finishes its files and checks."""
     llm_with_tools = llm.bind_tools(tools)
     messages = [
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_prompt),
     ]
-    for step in range(max_steps):
+    for step in range(1, max_steps + 1):
+        if step == max_steps -3:
+            message.append(HumanMessage(content="SYSTEM NOTICE: Only 3 tool calls remain. Complete any final file write or build check now and summarize."))
         response = llm_with_tools.invoke(messages)
         messages.append(response)
         if not response.tool_calls:
@@ -144,9 +146,11 @@ def build_project_graph(workspace_dir: str):
         print(f"\n[{state['project_name']}] Product Agent writing specs...")
         sys_prompt = (
             "You are a Principal Product Manager. Inspect the starter template with `list_files`, then write:\n"
-            "1. `docs/PRD.md`: Concise user stories, UI routes, SQLite schema, and numbered acceptance criteria.\n"
+            "1. `docs/PRD.md`: Concise user stories, UI routes, SQLite schema, numbered acceptance criteria, "
+            "AND a **UI Test Selector Contract** table listing exact `data-testid` attributes for every page, "
+            "form input, `<select>` dropdown, submit button, filter control, and summary/list output.\n"
             "2. `docs/openapi.yaml`: Complete, compact OpenAPI 3.1 contract defining every FastAPI endpoint, "
-            "request body, query parameter, and JSON response schema. Keep the spec concise and unambiguous."
+            "request body, query parameter, and JSON response schema."
         )
         summary = run_tool_agent(
             tools, tools_by_name, sys_prompt, f"Build specifications for:\n{state['task']}", max_steps=20
@@ -178,12 +182,14 @@ def build_project_graph(workspace_dir: str):
 
         sys_prompt = (
             "You are a Senior Next.js (App Router + TypeScript + Tailwind) Engineer. Read `docs/PRD.md`, "
-            "`docs/openapi.yaml`, and `docs/bugs.json` (if present). Build a complete, working UI in "
-            "`frontend/src/app/` and a typed fetch client in `frontend/src/lib/api.ts` targeting "
-            "`http://127.0.0.1:8000` that matches `docs/openapi.yaml`. "
+            "`docs/openapi.yaml`, and `docs/bugs.json` (if present). If `docs/bugs.json` has bugs, ALSO read "
+            "`frontend/tests/e2e.spec.ts` so you can verify the exact selectors and flows QA is testing.\n"
+            "Build a complete, working UI in `frontend/src/app/` and a typed fetch client in `frontend/src/lib/api.ts` "
+            "targeting `http://127.0.0.1:8000` that matches `docs/openapi.yaml`.\n"
             "CRITICAL RULES:\n"
-            "- NEVER write placeholder text, mock data, or non-functional buttons. Every form, file upload, "
-            "filter, and chart/summary must perform real API calls to `http://127.0.0.1:8000` and render live backend data.\n"
+            "- Apply every `data-testid` attribute defined in `docs/PRD.md` to the corresponding HTML elements.\n"
+            "- NEVER write placeholder text, mock data, or non-functional buttons. Every form, upload, filter, "
+            "and summary must perform real API calls to `http://127.0.0.1:8000` and render live backend data.\n"
             "- Ensure the root `/` page either renders the main dashboard or links clearly to all routes.\n"
             "- Run `npm run build` in `frontend` via `run_command` and fix all TypeScript/build errors before finishing."
         )
@@ -224,8 +230,13 @@ def build_project_graph(workspace_dir: str):
                 "Write `frontend/tests/e2e.spec.ts` with TWO test groups:\n"
                 "1. API Smoke Tests using Playwright's `request` fixture against `http://127.0.0.1:8000` to verify "
                 "every endpoint in `openapi.yaml` returns valid status codes and schemas.\n"
-                "2. Browser E2E Tests against `http://127.0.0.1:3000` verifying all user flows and acceptance criteria.\n"
-                "Run `npx playwright test --reporter=list` in `frontend` via `run_command`.\n"
+                "2. Browser E2E Tests against `http://127.0.0.1:3000` using the `data-testid` attributes defined in "
+                "`docs/PRD.md` (`page.getByTestId(...)`).\n"
+                "PLAYWRIGHT RULES:\n"
+                "- For `<select>` dropdowns, use `await select.selectOption('Paid')` and assert "
+                "`await expect(select).toHaveValue('Paid')` or check the rendered list items—NEVER call "
+                "`.toBeVisible()` on an `<option>` element.\n"
+                "- Run `npx playwright test --reporter=list` in `frontend` via `run_command`.\n"
                 "Write `docs/bugs.json` as a JSON array of objects:\n"
                 '[{"layer": "backend" | "frontend", "route": "...", "description": "...", "trace": "..."}]\n'
                 "Tag any 404/422/500 API error or missing database persistence as `\"layer\": \"backend\"`. "
@@ -282,6 +293,11 @@ def build_project_graph(workspace_dir: str):
             return "finalize"
         return state["route_back_to"]  # type: ignore
 
+    def route_after_backend(state: TeamState) -> Literal["frontend", "qa"]:
+        if state["iterations"] == 0 or any(b.get("layer") == "frontend" for b in state["bugs"]):
+            return "frontend"
+        return "qa"
+
     workflow = StateGraph(TeamState)
     workflow.add_node("product", product_node)
     workflow.add_node("backend", backend_node)
@@ -291,7 +307,11 @@ def build_project_graph(workspace_dir: str):
 
     workflow.set_entry_point("product")
     workflow.add_edge("product", "backend")
-    workflow.add_edge("backend", "frontend")
+    workflow.add_conditional_edges(
+        "backend",
+        route_after_backend,
+        {"frontend": "frontend", "qa": "qa"},
+    )
     workflow.add_edge("frontend", "qa")
     workflow.add_conditional_edges(
         "qa",
