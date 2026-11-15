@@ -28,7 +28,7 @@ def kill_process_tree(proc: subprocess.Popen):
     except Exception:
         proc.kill()
 
-        
+
 # =====================================================================
 # 1. WORKSPACE-JAILED TOOLS (Replaces single-string code & exec())
 # =====================================================================
@@ -89,7 +89,7 @@ def create_workspace_tools(workspace_dir: str):
     return tools, {t.name: t for t in tools}
 
 
-def run_tool_agent(tools: list, tools_by_name: dict, system_prompt: str, user_prompt: str, max_steps: int = 15) -> str:
+def run_tool_agent(tools: list, tools_by_name: dict, system_prompt: str, user_prompt: str, max_steps: int = 35) -> str:
     """Executes an agentic tool-calling loop until the agent finishes its files and checks."""
     llm_with_tools = llm.bind_tools(tools)
     messages = [
@@ -102,6 +102,7 @@ def run_tool_agent(tools: list, tools_by_name: dict, system_prompt: str, user_pr
         if not response.tool_calls:
             return response.content or "Completed."
         for tc in response.tool_calls:
+            print(f" [step {step}/{max_steps}] -> {tc['name']}({list(tc['args'].keys())})")
             fn = tools_by_name.get(tc["name"])
             result = fn.invoke(tc["args"]) if fn else f"Unknown tool: {tc['name']}"
             messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
