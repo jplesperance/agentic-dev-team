@@ -176,7 +176,7 @@ def build_project_graph(workspace_dir: str):
     def frontend_node(state: TeamState) -> TeamState:
         print(f"[{state['project_name']} | Iter {state['iterations']}] Frontend Agent building Next.js...")
 
-       sys_prompt = (
+        sys_prompt = (
             "You are a Senior Next.js (App Router + TypeScript + Tailwind) Engineer. Read `docs/PRD.md`, "
             "`docs/openapi.yaml`, and `docs/bugs.json` (if present). Build a complete, working UI in "
             "`frontend/src/app/` and a typed fetch client in `frontend/src/lib/api.ts` targeting "
@@ -195,7 +195,8 @@ def build_project_graph(workspace_dir: str):
 
     # --- AGENT 4: QA AGENT (Replaces tester_node + verifier_node) ---
     def qa_node(state: TeamState) -> TeamState:
-        print(f"[{state['project_name']} | Iter {state['iterations']}] QA Agent testing live full-stack app...")
+        current_iter = state["iterations"] + 1
+        print(f"[{state['project_name']} | Iter {current_iter}] QA Agent testing live full-stack app...")
         ws = Path(workspace_dir)
 
         backend_proc = subprocess.Popen(
@@ -203,12 +204,14 @@ def build_project_graph(workspace_dir: str):
             cwd=ws / "backend",
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
         frontend_proc = subprocess.Popen(
             ["npm", "run", "dev", "--", "-p", "3000"],
             cwd=ws / "frontend",
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
 
         try:
@@ -216,21 +219,23 @@ def build_project_graph(workspace_dir: str):
             fe_up = wait_for_port(3000, timeout=20)
 
             sys_prompt = (
-                "You are a QA Automation Engineer. FastAPI is running on http://127.0.0.1:8000 and Next.js is "
-                "running on http://127.0.0.1:3000. Read `docs/PRD.md` and `docs/openapi.yaml`. "
-                "Write end-to-end tests in `frontend/tests/e2e.spec.ts` covering every acceptance criterion, "
-                "then run `npx playwright test` in `frontend` via `run_command`. "
-                "Finally, write `docs/bugs.json` containing a JSON array of objects:\n"
+                "You are a QA Automation Engineer. FastAPI is live on http://127.0.0.1:8000 and Next.js is live on "
+                "http://127.0.0.1:3000. Read `docs/PRD.md` and `docs/openapi.yaml`.\n"
+                "Write `frontend/tests/e2e.spec.ts` with TWO test groups:\n"
+                "1. API Smoke Tests using Playwright's `request` fixture against `http://127.0.0.1:8000` to verify "
+                "every endpoint in `openapi.yaml` returns valid status codes and schemas.\n"
+                "2. Browser E2E Tests against `http://127.0.0.1:3000` verifying all user flows and acceptance criteria.\n"
+                "Run `npx playwright test --reporter=list` in `frontend` via `run_command`.\n"
+                "Write `docs/bugs.json` as a JSON array of objects:\n"
                 '[{"layer": "backend" | "frontend", "route": "...", "description": "...", "trace": "..."}]\n'
+                "Tag any 404/422/500 API error or missing database persistence as `\"layer\": \"backend\"`. "
                 "If all tests pass, write `[]` to `docs/bugs.json`."
             )
             prompt = f"Servers ready (backend={be_up}, frontend={fe_up}). Run E2E tests and file bugs in docs/bugs.json."
-            summary = run_tool_agent(tools, tools_by_name, sys_prompt, prompt)
+            summary = run_tool_agent(tools, tools_by_name, sys_prompt, prompt, max_steps=25)
         finally:
-            frontend_proc.terminate()
-            backend_proc.terminate()
-            frontend_proc.wait(timeout=10)
-            backend_proc.wait(timeout=10)
+            kill_process_tree(frontend_proc)
+            kill_process_tree(backend_proc)
 
         bugs_file = ws / "docs" / "bugs.json"
         bugs = json.loads(bugs_file.read_text(encoding="utf-8")) if bugs_file.exists() else []
@@ -245,14 +250,14 @@ def build_project_graph(workspace_dir: str):
             route_back = "finalize"
 
         status_msg = "All E2E tests passed!" if success else f"{len(bugs)} bug(s) filed -> routing to {route_back}"
-        log_entry = f"### Iteration {state['iterations']}: QA Agent\n**Status:** {status_msg}\n**Notes:** {summary}\n\n"
+        log_entry = f"### Iteration {current_iter}: QA Agent\n**Status:** {status_msg}\n**Notes:** {summary}\n\n"
 
         return {
             **state,
             "bugs": bugs,
             "success": success,
             "route_back_to": route_back,
-            "iterations": state["iterations"] + 1,
+            "iterations": current_iter,
             "execution_log": state["execution_log"] + [log_entry],
         }
 
