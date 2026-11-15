@@ -178,8 +178,7 @@ def build_project_graph(workspace_dir: str):
 
     # --- AGENT 3: FRONTEND AGENT (Next.js App Router + TypeScript) ---
     def frontend_node(state: TeamState) -> TeamState:
-        iter_num = state["iterations"] + 1
-        print(f"[{state['project_name']} | Iter {iter_num}] Frontend Agent building Next.js...")
+        print(f"[{state['project_name']} | Iter {state['iterations']}] Frontend Agent building Next.js...")
         sys_prompt = (
             "You are a Senior Next.js (App Router + TypeScript + Tailwind) Engineer. Read `docs/PRD.md`, "
             "`docs/openapi.yaml`, and `docs/bugs.json` (if present). Also inspect `backend/app/` schemas/routes "
@@ -197,7 +196,7 @@ def build_project_graph(workspace_dir: str):
         summary = run_tool_agent(
             tools, tools_by_name, sys_prompt, f"Implement or fix the Next.js frontend.{bug_msg}", max_steps=40
         )
-        log_entry = f"### Iteration {iter_num}: Frontend Agent\n**Summary:** {summary}\n\n"
+        log_entry = f"### Iteration {state['iterations']}: Frontend Agent\n**Summary:** {summary}\n\n"
         return {**state, "execution_log": state["execution_log"] + [log_entry]}
 
     # --- AGENT 4: QA AGENT (Replaces tester_node + verifier_node) ---
