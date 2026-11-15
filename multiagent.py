@@ -89,26 +89,50 @@ def create_workspace_tools(workspace_dir: str):
     return tools, {t.name: t for t in tools}
 
 
-def run_tool_agent(tools: list, tools_by_name: dict, system_prompt: str, user_prompt: str, max_steps: int = 40) -> str:
-    """Executes an agentic tool-calling loop until the agent finishes its files and checks."""
+def run_tool_agent(
+    tools: list,
+    tools_by_name: dict,
+    system_prompt: str,
+    user_prompt: str,
+    max_steps: int = 40,
+    require_tools: bool = True,
+) -> str:
     llm_with_tools = llm.bind_tools(tools)
     messages = [
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_prompt),
     ]
+    used_write_or_run = False
+
     for step in range(1, max_steps + 1):
-        if step == max_steps -3:
-            message.append(HumanMessage(content="SYSTEM NOTICE: Only 3 tool calls remain. Complete any final file write or build check now and summarize."))
+        if step == max_steps - 3:
+            messages.append(
+                HumanMessage(
+                    content="SYSTEM NOTICE: Only 3 tool calls remain. Complete any final file write or build check now and summarize."
+                )
+            )
         response = llm_with_tools.invoke(messages)
         messages.append(response)
+
         if not response.tool_calls:
+            if require_tools and not used_write_or_run:
+                messages.append(
+                    HumanMessage(
+                        content="You did not call `write_file` or `run_command`. Do NOT paste code in chat—use your tools to edit the files on disk and run the build/tests now."
+                    )
+                )
+                continue
             return response.content or "Completed."
+
         for tc in response.tool_calls:
-            print(f" [step {step}/{max_steps}] -> {tc['name']}({list(tc['args'].keys())})")
+            if tc["name"] in {"write_file", "run_command"}:
+                used_write_or_run = True
+            print(f"   [step {step}/{max_steps}] -> {tc['name']}({list(tc['args'].keys())})")
             fn = tools_by_name.get(tc["name"])
             result = fn.invoke(tc["args"]) if fn else f"Unknown tool: {tc['name']}"
             messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
-    return "Stopped after reaching max tool steps."
+
+    return f"Stopped after reaching max tool steps ({max_steps})."
 
 
 def wait_for_port(port: int, timeout: float = 15.0) -> bool:
@@ -180,25 +204,29 @@ def build_project_graph(workspace_dir: str):
 
     # --- AGENT 3: FRONTEND AGENT (Next.js App Router + TypeScript) ---
     def frontend_node(state: TeamState) -> TeamState:
-        print(f"[{state['project_name']} | Iter {state['iterations']}] Frontend Agent building Next.js...")
+        iter_num = state["iterations"] + 1
+        print(f"[{state['project_name']} | Iter {iter_num}] Frontend Agent building Next.js...")
         sys_prompt = (
-            "You are a Senior Next.js (App Router + TypeScript + Tailwind) Engineer.\n"
+            "You are a Senior Next.js (App Router + TypeScript + Tailwind) Engineer. Always use `write_file` and "
+            "`run_command`—never output code only in chat.\n"
             "1. If `docs/bugs.json` has bugs, your VERY FIRST tool call MUST be `read_file('docs/bugs.json')`, "
-            "followed by `read_file('frontend/tests/e2e.spec.ts')`. Never assume existing code works if QA failed it.\n"
+            "followed by `read_file('frontend/tests/e2e.spec.ts')`.\n"
             "2. Read `docs/PRD.md`, `docs/openapi.yaml`, and inspect `backend/app/` to confirm exact JSON field names.\n"
-            "3. Build a complete, working UI in `frontend/src/app/` and a typed fetch client in `frontend/src/lib/api.ts` "
-            "targeting `http://127.0.0.1:8000`.\n"
+            "3. Build the UI in `frontend/src/app/` and a typed fetch client in `frontend/src/lib/api.ts` targeting "
+            "`http://127.0.0.1:8000`.\n"
             "CRITICAL RULES:\n"
             "- Apply every `data-testid` attribute defined in `docs/PRD.md`.\n"
-            "- Wrap every `fetch` in `try { ... } catch (err) { setError(...) } finally { setLoading(false) }` "
-            "and render any API error message visibly on the page so forms never fail silently.\n"
+            "- NEVER render an empty container with 0 height: every list/table container with a `data-testid` MUST "
+            "have `min-h-[40px]` and render an empty-state message inside it (e.g., `<p>No items found.</p>`) when the array is empty.\n"
+            "- Pass `{ cache: 'no-store' }` to all `fetch` calls and include visible navigation links (`<Link>`) between `/` and all subpages.\n"
+            "- Wrap every `fetch` in `try { ... } catch (err) { setError(...) } finally { setLoading(false) }` and render errors visibly.\n"
             "- Run `npm run build` in `frontend` via `run_command` and fix all build errors before finishing."
         )
         bug_msg = f"\nFix these reported bugs:\n{json.dumps(state['bugs'], indent=2)}" if state["bugs"] else ""
         summary = run_tool_agent(
             tools, tools_by_name, sys_prompt, f"Implement or fix the Next.js frontend.{bug_msg}", max_steps=40
         )
-        log_entry = f"### Iteration {state['iterations']}: Frontend Agent\n**Summary:** {summary}\n\n"
+        log_entry = f"### Iteration {iter_num}: Frontend Agent\n**Summary:** {summary}\n\n"
         return {**state, "execution_log": state["execution_log"] + [log_entry]}
 
     # --- AGENT 4: QA AGENT (Replaces tester_node + verifier_node) ---
