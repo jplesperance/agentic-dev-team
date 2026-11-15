@@ -10,7 +10,7 @@ from typing import TypedDict, Literal, List
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
-from langchain_openai import ChatOpen
+from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 
 load_dotenv()
