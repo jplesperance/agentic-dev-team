@@ -1,4 +1,5 @@
 import os
+import signal
 import json
 import shutil
 import socket
@@ -16,9 +17,18 @@ from langgraph.graph import StateGraph, END
 load_dotenv()
 
 # Use temperature=0 for reliable tool calling and JSON/YAML generation
-llm = ChatOpenAI(model_name="gpt-4o", temperature=0, max_retries=2)
+llm = ChatOpenAI(model_name="gpt-4o", temperature=0, max_retries=2, timeout=90)
 
+def kill_process_tree(proc: subprocess.Popen):
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        proc.wait(timeout=5)
+    except Exception:
+        proc.kill()
 
+        
 # =====================================================================
 # 1. WORKSPACE-JAILED TOOLS (Replaces single-string code & exec())
 # =====================================================================
