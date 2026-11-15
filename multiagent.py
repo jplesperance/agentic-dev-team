@@ -178,25 +178,26 @@ def build_project_graph(workspace_dir: str):
 
     # --- AGENT 3: FRONTEND AGENT (Next.js App Router + TypeScript) ---
     def frontend_node(state: TeamState) -> TeamState:
-        print(f"[{state['project_name']} | Iter {state['iterations']}] Frontend Agent building Next.js...")
-
+        iter_num = state["iterations"] + 1
+        print(f"[{state['project_name']} | Iter {iter_num}] Frontend Agent building Next.js...")
         sys_prompt = (
             "You are a Senior Next.js (App Router + TypeScript + Tailwind) Engineer. Read `docs/PRD.md`, "
-            "`docs/openapi.yaml`, and `docs/bugs.json` (if present). If `docs/bugs.json` has bugs, ALSO read "
-            "`frontend/tests/e2e.spec.ts` so you can verify the exact selectors and flows QA is testing.\n"
+            "`docs/openapi.yaml`, and `docs/bugs.json` (if present). Also inspect `backend/app/` schemas/routes "
+            "to confirm the exact JSON field names returned by FastAPI.\n"
             "Build a complete, working UI in `frontend/src/app/` and a typed fetch client in `frontend/src/lib/api.ts` "
-            "targeting `http://127.0.0.1:8000` that matches `docs/openapi.yaml`.\n"
+            "targeting `http://127.0.0.1:8000`.\n"
             "CRITICAL RULES:\n"
             "- Apply every `data-testid` attribute defined in `docs/PRD.md` to the corresponding HTML elements.\n"
-            "- NEVER write placeholder text, mock data, or non-functional buttons. Every form, upload, filter, "
-            "and summary must perform real API calls to `http://127.0.0.1:8000` and render live backend data.\n"
-            "- Ensure the root `/` page either renders the main dashboard or links clearly to all routes.\n"
-            "- Run `npm run build` in `frontend` via `run_command` and fix all TypeScript/build errors before finishing."
+            "- NEVER let a page hang on a loading spinner: wrap every `fetch` in `try { ... } catch (err) { setError(...) } "
+            "finally { setLoading(false) }`, and render any error message visibly on the page.\n"
+            "- NEVER write placeholder text, mock data, or non-functional buttons.\n"
+            "- Run `npm run build` in `frontend` via `run_command` and fix all build errors before finishing."
         )
         bug_msg = f"\nFix these reported bugs:\n{json.dumps(state['bugs'], indent=2)}" if state["bugs"] else ""
-        summary = run_tool_agent(tools, tools_by_name, sys_prompt, f"Implement or fix the Next.js frontend.{bug_msg}")
-
-        log_entry = f"### Iteration {state['iterations']}: Frontend Agent\n**Summary:** {summary}\n\n"
+        summary = run_tool_agent(
+            tools, tools_by_name, sys_prompt, f"Implement or fix the Next.js frontend.{bug_msg}", max_steps=40
+        )
+        log_entry = f"### Iteration {iter_num}: Frontend Agent\n**Summary:** {summary}\n\n"
         return {**state, "execution_log": state["execution_log"] + [log_entry]}
 
     # --- AGENT 4: QA AGENT (Replaces tester_node + verifier_node) ---
@@ -233,12 +234,15 @@ def build_project_graph(workspace_dir: str):
                 "2. Browser E2E Tests against `http://127.0.0.1:3000` using the `data-testid` attributes defined in "
                 "`docs/PRD.md` (`page.getByTestId(...)`).\n"
                 "PLAYWRIGHT RULES:\n"
+                "- Attach `page.on('pageerror', ...)` and `page.on('response', ...)` listeners in `test.beforeEach` "
+                "to capture runtime JS exceptions and HTTP >= 400 responses, and log `await page.locator('body').innerText()` "
+                "on failure so bugs are immediately diagnosable.\n"
                 "- For `<select>` dropdowns, use `await select.selectOption('Paid')` and assert "
-                "`await expect(select).toHaveValue('Paid')` or check the rendered list items—NEVER call "
-                "`.toBeVisible()` on an `<option>` element.\n"
+                "`await expect(select).toHaveValue('Paid')`—NEVER call `.toBeVisible()` on an `<option>` element.\n"
                 "- Run `npx playwright test --reporter=list` in `frontend` via `run_command`.\n"
                 "Write `docs/bugs.json` as a JSON array of objects:\n"
                 '[{"layer": "backend" | "frontend", "route": "...", "description": "...", "trace": "..."}]\n'
+                "Include any browser console/page errors, HTTP status codes, and visible page text inside `trace`. "
                 "Tag any 404/422/500 API error or missing database persistence as `\"layer\": \"backend\"`. "
                 "If all tests pass, write `[]` to `docs/bugs.json`."
             )
