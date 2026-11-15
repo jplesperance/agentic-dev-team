@@ -141,23 +141,18 @@ def build_project_graph(workspace_dir: str):
 
     # --- AGENT 1: PRODUCT AGENT (Replaces planner_node) ---
     def product_node(state: TeamState) -> TeamState:
-        current_iter = state["iterations"]
-        print(f"\n[{state['project_name']} | Iter {current_iter}] Product Agent writing specs...")
-
+        print(f"\n[{state['project_name']}] Product Agent writing specs...")
         sys_prompt = (
             "You are a Principal Product Manager. Inspect the starter template with `list_files`, then write:\n"
-            "1. `docs/PRD.md`: User stories, UI pages, SQLite data models, and numbered acceptance criteria.\n"
-            "2. `docs/openapi.yaml`: Strict OpenAPI 3.1 contract defining all FastAPI endpoints, request payloads, "
-            "and JSON responses so backend and frontend agents can build against the exact same schema."
+            "1. `docs/PRD.md`: Concise user stories, UI routes, SQLite schema, and numbered acceptance criteria.\n"
+            "2. `docs/openapi.yaml`: Complete, compact OpenAPI 3.1 contract defining every FastAPI endpoint, "
+            "request body, query parameter, and JSON response schema. Keep the spec concise and unambiguous."
         )
-        summary = run_tool_agent(tools, tools_by_name, sys_prompt, f"Build specifications for:\n{state['task']}")
-
-        log_entry = f"### Iteration {current_iter}: Product Agent\n**Summary:** {summary}\n\n"
-        return {
-            **state,
-            "iterations": current_iter,
-            "execution_log": state["execution_log"] + [log_entry],
-        }
+        summary = run_tool_agent(
+            tools, tools_by_name, sys_prompt, f"Build specifications for:\n{state['task']}", max_steps=20
+        )
+        log_entry = f"### Product Agent\n**Summary:** {summary}\n\n"
+        return {**state, "execution_log": state["execution_log"] + [log_entry]}
 
     # --- AGENT 2: BACKEND AGENT (FastAPI + Pytest) ---
     def backend_node(state: TeamState) -> TeamState:
