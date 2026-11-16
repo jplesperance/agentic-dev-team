@@ -203,7 +203,6 @@ def build_project_graph(workspace_dir: str):
         )
         log_entry = f"### Product Agent\n**Summary:** {summary}\n\n"
         return {**state, "execution_log": state["execution_log"] + [log_entry]}
-    
 
     # --- AGENT 2: BACKEND AGENT (FastAPI + Pytest) ---
     def backend_node(state: TeamState) -> TeamState:
