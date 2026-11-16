@@ -185,8 +185,6 @@ def build_project_graph(workspace_dir: str):
     # --- AGENT 1: PRODUCT AGENT (Replaces planner_node) ---
     def product_node(state: TeamState) -> TeamState:
         print(f"\n[{state['project_name']}] Product Agent writing specs...")
-        def product_node(state: TeamState) -> TeamState:
-        print(f"\n[{state['project_name']}] Product Agent writing specs...")
         sys_prompt = (
             "You are a Principal Product Manager. Inspect the starter template with `list_files`, then write:\n"
             "1. `docs/PRD.md`: Concise user stories, UI routes, SQLite schema, numbered acceptance criteria, "
@@ -205,11 +203,7 @@ def build_project_graph(workspace_dir: str):
         )
         log_entry = f"### Product Agent\n**Summary:** {summary}\n\n"
         return {**state, "execution_log": state["execution_log"] + [log_entry]}
-        summary = run_tool_agent(
-            tools, tools_by_name, sys_prompt, f"Build specifications for:\n{state['task']}", max_steps=20
-        )
-        log_entry = f"### Product Agent\n**Summary:** {summary}\n\n"
-        return {**state, "execution_log": state["execution_log"] + [log_entry]}
+    
 
     # --- AGENT 2: BACKEND AGENT (FastAPI + Pytest) ---
     def backend_node(state: TeamState) -> TeamState:
