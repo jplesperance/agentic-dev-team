@@ -185,6 +185,8 @@ def build_project_graph(workspace_dir: str):
     # --- AGENT 1: PRODUCT AGENT (Replaces planner_node) ---
     def product_node(state: TeamState) -> TeamState:
         print(f"\n[{state['project_name']}] Product Agent writing specs...")
+        def product_node(state: TeamState) -> TeamState:
+        print(f"\n[{state['project_name']}] Product Agent writing specs...")
         sys_prompt = (
             "You are a Principal Product Manager. Inspect the starter template with `list_files`, then write:\n"
             "1. `docs/PRD.md`: Concise user stories, UI routes, SQLite schema, numbered acceptance criteria, "
@@ -192,9 +194,17 @@ def build_project_graph(workspace_dir: str):
             "form input, `<select>` dropdown, submit button, and list/summary element.\n"
             "2. `docs/openapi.yaml`: Complete, compact OpenAPI 3.1 contract defining every FastAPI endpoint, "
             "request body, query parameter, and JSON response schema.\n"
-            "SCOPE RULE: Build ONLY what the user asked for. Do NOT add user registration, login, or authentication "
-            "unless the user's prompt explicitly requests user accounts or authentication."
+            "SELECTOR & SCOPE RULES:\n"
+            "- Build ONLY what the user asked for. Do NOT add user registration, login, or authentication "
+            "unless the user's prompt explicitly requests user accounts.\n"
+            "- NEVER put dynamic database IDs inside `data-testid` (e.g., use static `data-testid=\"habit-item\"`, "
+            "`data-testid=\"toggle-button\"`, `data-testid=\"streak-count\"` inside each row instead of `habit-item-{id}`)."
         )
+        summary = run_tool_agent(
+            tools, tools_by_name, sys_prompt, f"Build specifications for:\n{state['task']}", max_steps=20
+        )
+        log_entry = f"### Product Agent\n**Summary:** {summary}\n\n"
+        return {**state, "execution_log": state["execution_log"] + [log_entry]}
         summary = run_tool_agent(
             tools, tools_by_name, sys_prompt, f"Build specifications for:\n{state['task']}", max_steps=20
         )
@@ -226,17 +236,21 @@ def build_project_graph(workspace_dir: str):
         sys_prompt = (
             "You are a Senior Next.js (App Router + TypeScript + Tailwind) Engineer. Always use `write_file` and "
             "`run_command`—never output code only in chat.\n"
-            "1. If `docs/bugs.json` has bugs, your VERY FIRST tool call MUST be `read_file('docs/bugs.json')`, "
-            "followed by `read_file('frontend/tests/e2e.spec.ts')`.\n"
+            "1. If `docs/bugs.json` has bugs, your VERY FIRST tool calls MUST be `read_file('docs/bugs.json')`, "
+            "`read_file('frontend/tests/e2e.spec.ts')`, and reading your existing files in `frontend/src/`.\n"
             "2. Read `docs/PRD.md`, `docs/openapi.yaml`, and call `list_files('backend/app')` + `read_file` on "
             "the backend route/schema files to confirm exact JSON field names.\n"
-            "3. Build the UI in `frontend/src/app/` and a typed fetch client in `frontend/src/lib/api.ts` targeting "
-            "`http://127.0.0.1:8000`.\n"
+            "3. Build or update the UI in `frontend/src/app/` and typed fetch client in `frontend/src/lib/api.ts` "
+            "targeting `http://127.0.0.1:8000`.\n"
             "CRITICAL RULES:\n"
+            "- On bug-fix iterations, make MINIMAL, SURGICAL edits to fix only the reported bugs. Do NOT rewrite "
+            "working pages or delete existing `data-testid` attributes and handlers.\n"
             "- Apply every `data-testid` attribute defined in `docs/PRD.md`.\n"
-            "- NEVER render an empty container with 0 height: every list/table container with a `data-testid` MUST "
-            "have `min-h-[40px]` and render an empty-state message inside it (e.g., `<p>No items found.</p>`) when the array is empty.\n"
-            "- Pass `{ cache: 'no-store' }` to all `fetch` calls and include visible navigation links (`<Link>`) between `/` and all subpages.\n"
+            "- Always `await` `POST`/`PUT`/`DELETE` API calls before calling `router.push(...)` so the target page "
+            "fetches updated data.\n"
+            "- Every list/table container with a `data-testid` MUST have `min-h-[40px]` and render an empty-state "
+            "message when empty so it never collapses to 0px height.\n"
+            "- Pass `{ cache: 'no-store' }` to all `fetch` calls and include visible `<Link>` navigation between `/` and subpages.\n"
             "- Wrap every `fetch` in `try { ... } catch (err) { setError(...) } finally { setLoading(false) }` and render errors visibly.\n"
             "- Run `npm run build` in `frontend` via `run_command` and fix all build errors before finishing."
         )
@@ -279,13 +293,16 @@ def build_project_graph(workspace_dir: str):
             sys_prompt = (
                 "You are a QA Automation Engineer. FastAPI is live on http://127.0.0.1:8000 and Next.js is live on "
                 "http://127.0.0.1:3000. Read `docs/PRD.md` and `docs/openapi.yaml`.\n"
-                "Write `frontend/tests/e2e.spec.ts` with TWO test groups:\n"
-                "1. API Smoke Tests using Playwright's `request` fixture against `http://127.0.0.1:8000` verifying "
-                "every endpoint in `openapi.yaml`.\n"
-                "2. Browser E2E Tests against `http://127.0.0.1:3000` using `page.getByTestId(...)` from `docs/PRD.md`.\n"
+                "Write `frontend/tests/e2e.spec.ts` with TWO `test.describe.serial` groups IN THIS ORDER:\n"
+                "1. Browser E2E Tests (runs FIRST while the database is empty) against `http://127.0.0.1:3000` using "
+                "`page.getByTestId(...)` from `docs/PRD.md` and `.filter({ hasText: ... })` for specific items.\n"
+                "2. API Smoke Tests (runs SECOND) using Playwright's `request` fixture against `http://127.0.0.1:8000` "
+                "verifying every endpoint in `openapi.yaml`.\n"
                 "PLAYWRIGHT RULES:\n"
-                "- Remember each Playwright `test()` block starts with empty `localStorage` and cookies. Either seed "
-                "required prerequisites per test or use `test.describe.serial` with a shared flow.\n"
+                "- On bug-fix iterations, read `frontend/tests/e2e.spec.ts` first and only adjust assertions if they "
+                "had a bug—keep passing tests intact.\n"
+                "- After clicking a submit button that navigates to another route, always `await page.waitForURL(...)` "
+                "before asserting elements on the destination page.\n"
                 "- Attach `page.on('pageerror', ...)` and `page.on('response', async res => { if (res.status() >= 400) ... })` "
                 "to capture HTTP status codes, response bodies, and runtime JS errors.\n"
                 "- For `<select>` dropdowns, use `await select.selectOption(...)` and assert `toHaveValue(...)`—NEVER "
